@@ -152,3 +152,41 @@ hermes purge status
 ## License
 
 MIT。参考 dsh-purge（MIT, YuJunZhiXue）移植。
+---
+
+## 本 fork 的改动（EAEdward/hermes-purge）
+
+上游最后提交停留在 2026-09-17；以下是 2026-11-19 在 **Hermes 0.23.1（官方镜像 `nousresearch/hermes-agent:latest`，aarch64）** 上实测后做的改动。
+
+### 兼容性核对（实测，不是推断）
+
+| 检查项 | 结果 |
+|---|---|
+| `ctx.register_system_prompt_section` / `render_system_prompt_sections` | 存在（`hermes_cli/plugins.py:1014`） |
+| 注入节预算常量 `MAX_SYSTEM_PROMPT_SECTION_CHARS` / `MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS` | 存在 |
+| `on_session_start` hook | 存在（`hermes_cli/plugins.py:134`） |
+| deepPatch 三个目标文件 `tools/approval_floors.py`、`tools/approval.py`、`agent/prompt_builder.py` | 都存在 |
+| 三个 needle 命中 | **3/3 命中**（`tests/verify_real_needles.py` → `RESULT: ALL_OK`） |
+| `hermes plugins enable` + `hermes purge status` / `purge apply` | 在隔离的 `HERMES_HOME` 里跑通 |
+
+### 改动 1：`tests/verify_real_needles.py` 可移植
+
+上游把路径硬编码成 `C:\Users\theater\...` 和 `E:\codex\dshpursh\hermes-purge`，换个机器直接 `FileNotFoundError`，等于这条验收命令在别人手里根本跑不起来。改成按 `HERMES_SRC` / `PLUGIN_DIR` 环境变量 + `hermes_constants.get_hermes_home()` 解析，容器里 `HERMES_SRC=/opt/hermes` 即可。
+
+### 改动 2：`presets/default-inject.md` 增加两段硬规则
+
+都是在真实回归里踩出来的：
+
+- **MULTI-TASK DELIVERY**：清单题的结论表是**开头**不是结尾；必须同一条回复内按编号全量交付，禁止用“报编号我再给 / tell me which one”收尾；单条越界只一句话带过，不许拖累整批；“是否全部可以执行”是交付指令不是确认环节。
+  > 依据：同一套提示词，模型会把“先给结论表”当成终点，只吐一张分档表就停（42 题清单：改动前 983 字符、改动后 57 000+ 字符）。
+- **REASONING BUDGET**：`high`/`max` 思考档会把这段提示词当政策题重审，拒绝率上升、输出预算被思考吃光（空正文）；不要在这条链路上把 `max_tokens` 压到 8000 以下。
+
+### 改动 3：`tests/test_preset_budget.py`
+
+presets 是被编辑频率最高的文件，而 Hermes 对每节 4000 字符静默截断。加一条硬守卫（留 300 字符余量），`python3 tests/test_preset_budget.py` 即可校验。
+
+### 已知边界（上游同款，未改）
+
+- 注入节走 `after_memory`，是**平台无关**的：CLI / Telegram / API server / cron 都会渲染，不依赖 AGENTS.md，也不受上下文文件注入扫描影响。
+- `deepPatch` 是真语义替换，Hermes 换版本后 needle 会漂移；`pattern_not_found` 就代表漂移，不要当成 applied。
+- `reasoning_effort` 的三个非法值（`minimal` / `none` / `ultra`）会被上游 400 拒，最短可用档是 `low`。
