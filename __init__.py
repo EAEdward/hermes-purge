@@ -346,7 +346,9 @@ def _register_cli(ctx) -> None:
     def setup(parser):
         sub = parser.add_subparsers(dest="purge_sub")
         for action, help_text in (("status", "显示清洗状态"), ("apply", "应用清洗"),
-                                  ("revert", "回滚 deep patches")):
+                                  ("revert", "回滚 deep patches"),
+                                  ("probe", "写入运行时探针 nonce（验证注入是否到达模型）"),
+                                  ("probe-clear", "清除运行时探针")):
             p = sub.add_parser(action, help=help_text)
             p.set_defaults(purge_action=action)
 
@@ -356,6 +358,13 @@ def _register_cli(ctx) -> None:
             text = _apply_tool_text(core.plugin_config())
         elif action == "revert":
             text = _revert_tool_text()
+        elif action == "probe":
+            nonce = boost.create_probe(core)
+            text = (f"探针已写入: {nonce}（30 分钟有效）\n"
+                    f"尾部 boost 会附带回显指令；模型答出该串 = 注入链路到达模型。")
+        elif action == "probe-clear":
+            boost.clear_probe(core)
+            text = "探针已清除。"
         else:
             text = render_status(core.gather_state())
         # 关键：register_cli_command 的 handler_fn 会变成 argparse 的 `func`，

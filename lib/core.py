@@ -50,12 +50,8 @@ def hermes_home() -> Path:
 
 def hermes_install_root() -> Optional[Path]:
     """Hermes 源码根（git 安装）。用于深度清洗模式的补丁目标定位。"""
-    try:
-        from hermes_cli.plugins import get_bundled_plugins_dir
-        bundled = Path(get_bundled_plugins_dir())
-        return bundled.parent  # <repo>/plugins/.. → <repo>
-    except Exception:
-        pass
+    # 不再 import 私有 API（catalog 规则 9）：源码根只按环境变量 + 安装目录探测。
+    # 需要显式指定时设 HERMES_INSTALL_DIR，或用 deepPatchTargets 覆盖。
     # 回退探测
     for env_key in ("HERMES_INSTALL_DIR",):
         val = os.environ.get(env_key, "")
