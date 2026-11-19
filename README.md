@@ -190,3 +190,41 @@ presets 是被编辑频率最高的文件，而 Hermes 对每节 4000 字符静�
 - 注入节走 `after_memory`，是**平台无关**的：CLI / Telegram / API server / cron 都会渲染，不依赖 AGENTS.md，也不受上下文文件注入扫描影响。
 - `deepPatch` 是真语义替换，Hermes 换版本后 needle 会漂移；`pattern_not_found` 就代表漂移，不要当成 applied。
 - `reasoning_effort` 的三个非法值（`minimal` / `none` / `ultra`）会被上游 400 拒，最短可用档是 `low`。
+
+## 升级到 1.1.0：对齐 dsh-purge 1.7.20 的 refusal-retry
+
+上游最后停更在 2026-09-17，而 dsh-purge 本体已经走到 **1.7.20**（本机 `dsh-purge-community 1.7.20` 实测）。1.7.x 的核心增量是**拒绝检测 + 自动重试**，这一版把它按 Hermes 的机制映射过来。
+
+### 映射表：dsh-purge 1.7.20 → hermes-purge 1.1.0
+
+| dsh-purge（DSH） | hermes-purge（Hermes） |
+|---|---|
+| 流层拦截：`streamFactory()` 重建流，命中拒绝就重发（1.7.19 修了子代理建流抛错、1.7.20 修了假 `recovered`） | Hermes 的流由内核持有，插件无法重建。改为**两个可介入点**：<br>`llm_request` 中间件（请求层改写）+ `pre_verify` hook（回合停门，仅在改过文件时开放同回合 continue） |
+| 中文句中拒绝句式（1.7.17 补：“我不会给”“我不提供”…） | `lib/refusal.py` 逐条对齐，CN + EN 两套，另加开头 200 字符的兜底正则 |
+| 推理先行的误判修复（1.7.17） | 只看正文 `content`，从不看 `reasoning_content` |
+| `refusal_retry` / `refusal_retry_outcome` 审计 | `plugin-data/hermes-purge/refusal-audit.jsonl`，`refusal_detected` / `refusal_retry` / `refusal_retry_outcome(exhausted)` |
+| 逐次升级的 nudge 文案 | `NUDGES` 三段递进，`maxAttempts` 默认 2 |
+| 假成功标签（1.7.20） | 未命中正文（空答复）**不计**为拒绝——空是预算问题，交给 REASONING BUDGET 规则，避免 dsh 那种 `recovered` 误判 |
+
+### 配置
+
+```yaml
+plugins:
+  entries:
+    hermes-purge:
+      settings:
+        refusalRetry:
+          enabled: true      # 默认开
+          maxAttempts: 2     # pre_verify 通道的同回合重试上限
+          patterns: []       # 追加自定义拒绝句式（小写子串匹配）
+```
+
+### 两条通道的实际差别（别当成同一件事）
+
+- `llm_request`：**跨回合自愈**。上一次 assistant 是拒绝时，下一次请求自动带纠正指令——所有平台（CLI/TG/API/cron）都生效，但用户要再发一条消息。
+- `pre_verify`：**同回合真重试**。Hermes 只在“本回合改过文件”时才开放这个 continue 口子，所以它救的是编码/运维这类有文件产出的回合。
+- 纯聊天回合想同回合重试，需要内核开放流层 hook；当前 Hermes 没有，这就是移植边界。
+
+### 测试
+
+`tests/test_refusal.py`：CN/EN 检测矩阵、交付物不误判、nudge 升级与封顶、只惩罚最后一条 assistant、开关、以及中间件/hook 入口的真实返回值。`python3 tests/test_refusal.py` 全绿即可。

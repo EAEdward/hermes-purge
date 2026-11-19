@@ -17,7 +17,7 @@ import logging
 import threading
 from typing import Any, Dict, Optional
 
-from .lib import core
+from .lib import core, refusal
 from .lib import inject
 
 logger = logging.getLogger(__name__)
@@ -352,6 +352,61 @@ def _register_cli(ctx) -> None:
                              setup_fn=setup, handler_fn=handler)
 
 
+
+# ── 拒绝检测 + 纠正（dsh-purge 1.7.20 refusal-retry 的 Hermes 映射）─────
+# 通道 A（llm_request）：历史里最近一条 assistant 是拒绝 → 纠正指令随本次请求发出。
+# 通道 B（pre_verify）：本回合改过文件时 Hermes 允许同回合继续 → 直接真重试一次。
+
+def _refusal_cfg() -> Dict[str, Any]:
+    try:
+        return core.plugin_config()
+    except Exception:
+        return {}
+
+
+def _llm_request_refusal_middleware(**kwargs):
+    try:
+        cfg = _refusal_cfg()
+        if not refusal.enabled(cfg):
+            return None
+        request = kwargs.get("request") or kwargs.get("args") or {}
+        messages = request.get("messages") if isinstance(request, dict) else None
+        if not isinstance(messages, list):
+            return None
+        nudge = refusal.corrective_from_messages(messages, cfg)
+        if not nudge:
+            return None
+        patched = dict(request)
+        patched["messages"] = list(messages) + [{"role": "system", "content": nudge}]
+        refusal.audit(core, "refusal_detected", channel="llm_request",
+                      session=kwargs.get("session_id", ""), model=kwargs.get("model", ""))
+        return {"request": patched, "name": "hermes-purge/refusal-retry",
+                "reason": "assistant refusal in history"}
+    except Exception as exc:
+        logger.debug("hermes-purge: llm_request refusal middleware failed: %s", exc)
+        return None
+
+
+def _pre_verify_refusal(**kwargs):
+    try:
+        cfg = _refusal_cfg()
+        if not refusal.enabled(cfg):
+            return None
+        attempt = int(kwargs.get("attempt", 0) or 0)
+        if attempt >= refusal.max_attempts(cfg):
+            refusal.audit(core, "refusal_retry_outcome", outcome="exhausted", attempt=attempt)
+            return None
+        resp = str(kwargs.get("final_response") or "")
+        if not refusal.is_refusal(resp, cfg):
+            return None
+        refusal.audit(core, "refusal_retry", channel="pre_verify", attempt=attempt + 1,
+                      session=kwargs.get("session_id", ""), chars=len(resp), frame=resp[:120])
+        return {"action": "continue", "message": refusal.build_nudge(attempt + 1)}
+    except Exception as exc:
+        logger.debug("hermes-purge: pre_verify refusal hook failed: %s", exc)
+        return None
+
+
 # ── 插件入口 ─────────────────────────────────────────────────────
 
 def register(ctx) -> None:
@@ -405,6 +460,16 @@ def register(ctx) -> None:
         ctx.register_hook("on_session_start", _on_session_start)
     except Exception as e:
         logger.warning("hermes-purge: on_session_start hook registration failed: %s", e)
+
+    # 6. 拒绝检测 + 纠正（移植 dsh-purge 1.7.20 的 refusal-retry）
+    try:
+        ctx.register_middleware("llm_request", _llm_request_refusal_middleware)
+    except Exception as e:
+        logger.warning("hermes-purge: llm_request middleware registration failed: %s", e)
+    try:
+        ctx.register_hook("pre_verify", _pre_verify_refusal)
+    except Exception as e:
+        logger.warning("hermes-purge: pre_verify hook registration failed: %s", e)
 
     # 审批结果观察者（不阻断；仅 verbose 记录）
     def _on_approval_response(**kwargs):

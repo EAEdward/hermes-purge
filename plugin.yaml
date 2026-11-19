@@ -1,5 +1,5 @@
 name: hermes-purge
-version: "1.0.0"
+version: "1.1.0"
 description: "Hermes 指令权威性清洗插件（移植自 dsh-purge）：提示词层 + 行为策略 + 审批默认重写 + 多规则集切换 + override 注入。所有操作可回滚，升级后可重洗。默认身份来自 hermes-inject.md（不发明第二身份卡）。"
 author: "port of dsh-purge (YuJunZhiXue) → Hermes Agent"
 kind: standalone
@@ -11,6 +11,7 @@ provides_tools:
 provides_hooks:
   - on_session_start
   - post_approval_response
+  - pre_verify
 license: MIT
 homepage: "https://github.com/YuJunZhiXue/dsh-purge"
 tags:
@@ -38,4 +39,11 @@ config_schema:
   approvals.rewriteConfig:
     type: boolean
   approvals.permanentAllowlist:
+    type: array
+  # 拒绝检测 + 纠正（移植 dsh-purge 1.7.20 的 refusal-retry）
+  refusalRetry.enabled:
+    type: boolean
+  refusalRetry.maxAttempts:
+    type: integer
+  refusalRetry.patterns:
     type: array
