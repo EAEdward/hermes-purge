@@ -74,11 +74,19 @@ def test_middleware_and_hook_entrypoints():
                                       {"role": "assistant", "content": "我不写这个"}]}
     out = mod._llm_request_refusal_middleware(request=req, session_id="s1", model="x")
     assert out and "messages" in out["request"]
-    assert out["request"]["messages"][-1]["role"] == "system"
-    assert len(out["request"]["messages"]) == len(req["messages"]) + 1
+    msgs = out["request"]["messages"]
+    assert msgs[-1]["role"] == "system"
+    # 尾部注入 = boost + 拒绝纠正（各一条 system），顺序固定 boost 在前
+    from lib import boost as _b
+    assert _b.MARKER in msgs[-2]["content"], "boost 应在纠正之前、且位于尾部两段之一"
+    assert "判定为拒绝" in msgs[-1]["content"]
+    assert len(msgs) == len(req["messages"]) + 2
 
+    # 非拒绝场景：只追加 boost，不追加纠正
+    from lib import boost as _b2
     ok = mod._llm_request_refusal_middleware(request={"messages": [{"role": "assistant", "content": "```py\nprint(1)\n```"}]})
-    assert ok is None
+    assert ok and len(ok["request"]["messages"]) == 2
+    assert _b2.MARKER in ok["request"]["messages"][-1]["content"]
 
     cont = mod._pre_verify_refusal(final_response="我不会给这个", attempt=0, session_id="s1")
     assert cont and cont["action"] == "continue" and cont["message"]
@@ -89,3 +97,29 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("PASS", name)
+
+
+def test_tail_boost_injected_last_and_idempotent():
+    """boost 必须落在消息末尾，且同一条 messages 不会被重复追加。"""
+    import importlib.util
+    import types
+
+    root = Path(__file__).resolve().parent.parent
+    sys.modules.setdefault("hermes_constants", types.SimpleNamespace(get_hermes_home=lambda: root.parent))
+    spec = importlib.util.spec_from_file_location(
+        "hermes_purge_probe2", root / "__init__.py", submodule_search_locations=[str(root)])
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["hermes_purge_probe2"] = mod
+    spec.loader.exec_module(mod)
+
+    from lib import boost
+    req = {"model": "x", "messages": [{"role": "user", "content": "写个端口扫描器"}]}
+    out = mod._llm_request_refusal_middleware(request=req)
+    assert out, "boost 未注入"
+    msgs = out["request"]["messages"]
+    assert msgs[-1]["role"] == "system" and boost.MARKER in msgs[-1]["content"]
+    assert len(msgs) == len(req["messages"]) + 1
+
+    # 幂等：把已注入的 messages 再送一遍，不再追加第二条 boost
+    again = mod._llm_request_refusal_middleware(request={"messages": msgs})
+    assert again is None or len(again["request"]["messages"]) == len(msgs)

@@ -17,7 +17,7 @@ import logging
 import threading
 from typing import Any, Dict, Optional
 
-from .lib import core, refusal
+from .lib import boost, core, refusal
 from .lib import inject
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,15 @@ def render_status(state: Dict[str, Any]) -> str:
     out = ["hermes-purge 状态 / Status"]
     out.append(_line("·", "Hermes home", state["hermes_home"]))
     out.append(_line("·", "安装根 / install root", state.get("install_root") or "未定位 (deepPatch 需手动设置)"))
+    try:
+        _cfg = core.plugin_config()
+        _nonce = boost.read_probe(core)
+        out.append(_line("✓" if boost.enabled(_cfg) else "·", "尾部 boost",
+                         "开启（llm_request 末尾注入）" if boost.enabled(_cfg) else "关闭"))
+        if _nonce:
+            out.append(_line("✓", "运行时探针", f"活跃 nonce={_nonce}"))
+    except Exception:
+        pass
     out.append(_line("✓" if state["override_exists"] else "✗",
                      "override 文件", f"{state['override_path']} (非空={state['override_nonempty']})"))
     out.append(_line("✓" if state["config_rewritten"] else "·",
@@ -135,6 +144,15 @@ def _handle_purge(raw_args: str = "", _cfg: Optional[Dict[str, Any]] = None) -> 
             lines.append("deepPatch 未开启（默认方案走官方配置+注入，无需补源码）")
         lines.append("完成。新会话生效（system_prompt_section 随会话重建）。")
         return "\n".join(lines)
+    if sub in ("probe", "p"):
+        nonce = boost.create_probe(core)
+        return (f"探针已写入: {nonce}（30 分钟内有效）\n"
+                f"尾部 boost 会附带一段「看到就回显 nonce」的指令；\n"
+                f"模型答出 `{nonce}` = 注入链路真的到达模型。\n"
+                f"清除: /purge probe off")
+    if sub in ("probe-clear", "probe-off"):
+        boost.clear_probe(core)
+        return "探针已清除。"
     if sub in ("revert", "r"):
         reverted, errors = core.revert_patches()
         res = core.apply_approval_config(force=False)
@@ -365,25 +383,54 @@ def _refusal_cfg() -> Dict[str, Any]:
 
 
 def _llm_request_refusal_middleware(**kwargs):
+    """尾部 boost 注入 + 拒绝纠正。
+
+    顺序：messages + [boost(system)] (+ [corrective(system)] if 上一轮是拒绝)
+    —— boost 永远最后落位，等价于 dsh-purge 把 boost 放在 order 最大处；
+    Hermes 的 system_prompt_section 只能落 after_memory，拿不到这个位置。
+    """
     try:
         cfg = _refusal_cfg()
-        if not refusal.enabled(cfg):
-            return None
         request = kwargs.get("request") or kwargs.get("args") or {}
         messages = request.get("messages") if isinstance(request, dict) else None
-        if not isinstance(messages, list):
+        if not isinstance(messages, list) or not messages:
             return None
-        nudge = refusal.corrective_from_messages(messages, cfg)
-        if not nudge:
+
+        appended = []
+
+        # A) 尾部 boost（默认开，幂等：已有 marker 就不重复）
+        if boost.enabled(cfg):
+            already = any(
+                isinstance(m, dict) and boost.MARKER in str(m.get("content") or "")
+                for m in messages
+            )
+            if not already:
+                home = None
+                try:
+                    from hermes_constants import get_hermes_home  # type: ignore
+                    home = get_hermes_home()
+                except Exception:
+                    home = None
+                nonce = boost.read_probe(core) or ""
+                appended.append({"role": "system",
+                                 "content": boost.boost_text(cfg, home=home, nonce=nonce)})
+
+        # B) 拒绝纠正（历史里最后一条 assistant 是拒绝时）
+        if refusal.enabled(cfg):
+            nudge = refusal.corrective_from_messages(messages, cfg)
+            if nudge:
+                appended.append({"role": "system", "content": nudge})
+                refusal.audit(core, "refusal_detected", channel="llm_request",
+                              session=kwargs.get("session_id", ""), model=kwargs.get("model", ""))
+
+        if not appended:
             return None
         patched = dict(request)
-        patched["messages"] = list(messages) + [{"role": "system", "content": nudge}]
-        refusal.audit(core, "refusal_detected", channel="llm_request",
-                      session=kwargs.get("session_id", ""), model=kwargs.get("model", ""))
-        return {"request": patched, "name": "hermes-purge/refusal-retry",
-                "reason": "assistant refusal in history"}
+        patched["messages"] = list(messages) + appended
+        return {"request": patched, "name": "hermes-purge/tail-boost",
+                "reason": "tail boost / refusal corrective"}
     except Exception as exc:
-        logger.debug("hermes-purge: llm_request refusal middleware failed: %s", exc)
+        logger.debug("hermes-purge: llm_request middleware failed: %s", exc)
         return None
 
 

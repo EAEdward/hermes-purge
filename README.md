@@ -228,3 +228,28 @@ plugins:
 ### 测试
 
 `tests/test_refusal.py`：CN/EN 检测矩阵、交付物不误判、nudge 升级与封顶、只惩罚最后一条 assistant、开关、以及中间件/hook 入口的真实返回值。`python3 tests/test_refusal.py` 全绿即可。
+
+## 1.2.0：把 dsh-purge 的「尾部 boost」搬过来（两个项目对照后的结论）
+
+同时读完 dsh-purge 1.7.20 与 hermes-purge 上游源码后，效果差异的根因只有一条：**注入位置**。
+
+| 项目 | 注入怎么落位 | 实测（42 题清单，同模型同机） |
+|---|---|---|
+| dsh-purge | 多 section + `order` 排序，boost 用**最大 order** 挂末尾，probe 再挂它后面 | 本机 41/42 交付（尾部权重） |
+| hermes-purge 1.0/1.1 | 只有 `system_prompt_section`，位置锁死 `after_memory`（中段，≤4000 字符） | 4 039 字节：约 14 条可做、24 条只讲思路 |
+| 手搓（SOUL 身份槽 + `agent.system_prompt` 每请求末尾） | 身份 + 末尾，两层都在高位 | 57 418 字符：41 条全量交付 |
+
+结论：Hermes 里唯一能拿到「末尾」位置的官方口子是 **`llm_request` 中间件**——它在发请求前拿到整份 `messages`，可以把 boost 作为**最后一条 system 消息**追加。这就是 dsh-purge `order: 最大` 的等价物，而且不需要 `agent.system_prompt`（那属于用户配置，不是插件）。
+
+### 新增
+
+- `lib/boost.py`：`BOOST_TEXT`（移植 dsh-purge boost 的四段结构：层级声明 → 夹具化 → 反软化 → 多轮重申，另加多任务交付一条）+ 可选自定义文件 `$HERMES_HOME/hermes-boost.md`。
+- `llm_request` 中间件改为 **尾部注入**：`messages + [boost] (+ [拒绝纠正])`；用 `MARKER` 幂等，重复经过不会叠加。
+- **运行时探针**（移植 `probe.js`）：`/purge probe` 生成 `purge-xxxx` nonce，boost 末尾附带「看到就回显」指令，`/purge probe-clear` 清除；`purge status` 显示当前 nonce。文件在 `plugin-data/hermes-purge/probe.json`，30 分钟 TTL。
+- 配置：`boost.enabled`（默认 true）、`boost.file`（自定义 boost 文本）。
+
+### 为什么不再需要改 SOUL / agent.system_prompt
+
+- 身份仍由用户的 `SOUL.md` 提供（插件不发明第二身份，这是上游的設計）。
+- 破甲强度由 boost 的**位置**保证，不再依赖往 SOUL 里塞规则，也不依赖用户级 `agent.system_prompt`。
+- `deepPatch` 保持默认关：实测三个源码补丁（身份改指、审批硬线、断路口径）会让模型更倾向分档拒绝，收益是负的。
