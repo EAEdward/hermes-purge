@@ -369,7 +369,10 @@ def test_register():
     check("section names purge-core/purge-rules", {s[0] for s in ctx.sections} == {"purge-core", "purge-rules"})
     check("register 2 commands", len(ctx.commands) == 2, str([c[0] for c in ctx.commands]))
     check("register 4 tools", len(ctx.tools) == 4, str([t[0] for t in ctx.tools]))
-    check("register 2 hooks", len(ctx.hooks) == 2, str([h[0] for h in ctx.hooks]))
+    check("register 3 hooks", len(ctx.hooks) == 3, str([h[0] for h in ctx.hooks]))
+    check("hook names on_session_start/pre_verify/post_approval_response",
+          {h[0] for h in ctx.hooks} == {"on_session_start", "pre_verify", "post_approval_response"},
+          str([h[0] for h in ctx.hooks]))
     check("register 1 cli", len(ctx.cli_commands) == 1, str([c[0] for c in ctx.cli_commands]))
 
     # 命令可用性

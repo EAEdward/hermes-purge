@@ -40,7 +40,8 @@ def _line(mark: str, title: str, value: Any, ok: Optional[bool] = None) -> str:
 def render_status(state: Dict[str, Any]) -> str:
     out = ["hermes-purge 状态 / Status"]
     out.append(_line("·", "Hermes home", state["hermes_home"]))
-    out.append(_line("·", "安装根 / install root", state.get("install_root") or "未定位 (deepPatch 需手动设置)"))
+    out.append(_line("·", "安装根 / install root",
+                     state.get("install_root") or "未定位（设 HERMES_INSTALL_DIR 或 deepPatchTargets）"))
     try:
         _cfg = core.plugin_config()
         _nonce = boost.read_probe(core)
@@ -62,6 +63,9 @@ def render_status(state: Dict[str, Any]) -> str:
         s = state["patch_status"][spec_id]
         mark = "✓" if s in ("applied", "already") else "✗" if s in ("pending",) else "·"
         out.append(f"  {mark} [#{spec_id}] {s}")
+    if any(v == "permission_denied" for v in state["patch_status"].values()):
+        out.append("  ⚠ 源码树不可写：Hermes 以 root 运行时需 chown 目标文件，"
+                   "或以 root 身份执行 purge_apply")
     out.append("")
     out.append(_line("·", "规则集目录", state["rules_dir"]))
     if state["rules"]:

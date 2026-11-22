@@ -49,19 +49,58 @@ def hermes_home() -> Path:
 
 
 def hermes_install_root() -> Optional[Path]:
-    """Hermes 源码根（git 安装）。用于深度清洗模式的补丁目标定位。"""
-    # 不再 import 私有 API（catalog 规则 9）：源码根只按环境变量 + 安装目录探测。
-    # 需要显式指定时设 HERMES_INSTALL_DIR，或用 deepPatchTargets 覆盖。
-    # 回退探测
-    for env_key in ("HERMES_INSTALL_DIR",):
+    """Hermes 源码根（git 安装）。用于深度清洗模式的补丁目标定位。
+
+    探测顺序（任一命中即返回）：
+      1. 环境变量 HERMES_INSTALL_DIR / HERMES_ROOT / HERMES_SRC
+      2. 已安装 hermes 包的父目录（importlib.find_spec，覆盖 pip / git / editable 安装）
+      3. 常见安装路径（/opt/hermes、/usr/local/lib/hermes、~/.hermes-src 等）
+      4. 从插件自身路径向上回溯（插件被放在源码树内时）
+
+    判定标准：候选目录下存在 agent/ 子目录。
+    """
+    def _ok(p: Optional[Path]) -> bool:
+        try:
+            return bool(p) and (p / "agent").is_dir()
+        except OSError:
+            return False
+
+    # 1. 显式环境变量
+    for env_key in ("HERMES_INSTALL_DIR", "HERMES_ROOT", "HERMES_SRC"):
         val = os.environ.get(env_key, "")
         if val:
-            cand = Path(val)
-            if (cand / "agent").is_dir():
+            cand = Path(val).expanduser()
+            if _ok(cand):
                 return cand
+
+    # 2. 已安装的 hermes 包（不 import 私有 API，只定位文件位置）
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("hermes")
+        if spec and spec.origin:
+            pkg = Path(spec.origin).resolve().parent
+            for cand in (pkg, pkg.parent):
+                if _ok(cand):
+                    return cand
+    except Exception:
+        pass
+
+    # 3. 常见安装路径
+    for cand in (
+        Path("/opt/hermes"),
+        Path("/usr/local/lib/hermes"),
+        Path("/usr/lib/hermes"),
+        Path("/srv/hermes"),
+        Path.home() / "hermes",
+        Path.home() / ".hermes-src",
+    ):
+        if _ok(cand):
+            return cand
+
+    # 4. 从插件路径向上回溯
     here = Path(__file__).resolve()
     for cand in (here.parent.parent.parent, here.parent.parent.parent.parent):
-        if (cand / "agent").is_dir():
+        if _ok(cand):
             return cand
     return None
 
@@ -333,6 +372,8 @@ def _patch_status(spec: PatchSpec) -> str:
         return "error_read"
     if spec.marker in text:
         return "already"
+    if not os.access(fp, os.W_OK):
+        return "permission_denied"
     if spec.needle in text:
         return "pending"
     return "pattern_not_found"

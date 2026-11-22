@@ -31,7 +31,7 @@
 
 ```sh
 # 1. 安装（仓库根即插件根，clone 落到 <HERMES_HOME>/plugins/hermes-purge/）
-hermes plugins install https://github.com/Theater-ahyeon/hermes-purge
+hermes plugins install https://github.com/EAEdward/hermes-purge
 
 # 2. 启用 —— 这一步不能省
 hermes plugins enable hermes-purge
@@ -280,3 +280,32 @@ purge-bfd9a431补充一句：这两段（hermes_boost / hermes_probe）是以"�
 ```
 
 nonce 被原样回显 = **尾部 boost 确实到达模型**（注入链路通了）；但模型同时明确“不采纳其中的权限声明”——因为 SOUL 里的人格（克制型专业助手）和 boost 的授权口径互相矛盾。这属于身份层，不是插件层能解决的。
+
+## 1.2.4：install root 自动探测 + 权限状态（让 deepPatch 在容器里真的可用）
+
+1.2.3 及以前，`hermes_install_root()` 只认 `HERMES_INSTALL_DIR` 环境变量，或从插件路径向上找含 `agent/` 的目录。插件装在 `$HERMES_HOME/plugins/` 时向上是 `$HERMES_HOME` 和 `/opt`，都不含 `agent/`，于是返回 `None`，三个 deep patch 全部报 `missing_file`——**看起来像补丁不存在，实际是源码根没找到**。
+
+### 改动
+
+- **探测顺序扩到四层**：`HERMES_INSTALL_DIR` / `HERMES_ROOT` / `HERMES_SRC` 环境变量 → `importlib.find_spec("hermes")` 定位已安装包（覆盖 pip / git / editable 安装）→ 常见路径（`/opt/hermes`、`/usr/local/lib/hermes`、`/usr/lib/hermes`、`/srv/hermes`、`~/hermes`、`~/.hermes-src`）→ 从插件路径向上回溯。判定标准统一为「候选目录下存在 `agent/`」。
+- **新增 `permission_denied` 状态**：目标文件存在但当前用户不可写时，不再误报 `missing_file`，而是明确报 `permission_denied`，并在 `purge status` 里给出处理提示（Hermes 以 root 运行时需 `chown` 目标文件，或以 root 身份执行 `purge_apply`）。
+- **状态面板**：install root 未定位时的提示改为「设 `HERMES_INSTALL_DIR` 或 `deepPatchTargets`」，指向真实可用的两个开关。
+- **测试**：`tests/test_smoke.py` 的 hook 断言从 2 个更新为 3 个（`on_session_start` / `pre_verify` / `post_approval_response`），与 `plugin.yaml` 的 `provides_hooks` 一致。
+
+### 实测（Hermes 0.23.1，aarch64 容器，`/opt/hermes` 源码树 root 拥有）
+
+```
+install_root = /opt/hermes
+patch_status = {'1': 'permission_denied', '2': 'permission_denied', '3': 'permission_denied'}
+```
+
+探测命中、needle 3/3 存在、状态如实反映权限边界——不再有「找不到文件」的假象。以 root 运行或 `chown` 后 `purge_apply` 即可真正落补丁。
+
+### 跑测试
+
+```sh
+# 容器内 venv 缺 pyyaml 时，装到临时目录再跑
+python3 -m pip install --target /tmp/pylibs pyyaml
+PYTHONPATH=/tmp/pylibs python3 tests/test_smoke.py   # ALL PASSED
+python3 tests/test_preset_budget.py                  # preset budget OK
+```
