@@ -307,5 +307,95 @@ patch_status = {'1': 'permission_denied', '2': 'permission_denied', '3': 'permis
 # 容器内 venv 缺 pyyaml 时，装到临时目录再跑
 python3 -m pip install --target /tmp/pylibs pyyaml
 PYTHONPATH=/tmp/pylibs python3 tests/test_smoke.py   # ALL PASSED
+python3 tests/run.py                                 # 1.3.0：17 项全绿
 python3 tests/test_preset_budget.py                  # preset budget OK
 ```
+
+## 1.3.0：doctor 自检 + 误判收敛 + 成品度条款
+
+三个方向都来自实测暴露出来的问题，不是凭感觉加的。
+
+### 1. 新增 `hermes purge doctor` / `/purge doctor`
+
+「插件装了但没生效」有十几种死法，以前要逐个命令试。现在一条命令列全：
+
+```
+$ hermes purge doctor
+hermes-purge 自检 / Doctor
+✓ 插件启用: enabled=true
+✓ 注入通道 llm_request: 已注册 ['llm_request']
+✓ 回合停门 pre_verify: 已注册 ['pre_verify']
+✓ 尾部 boost: builtin · 1978 字符 · sha1=7b7bfa7f8d31
+· 运行时探针: 未启用（hermes purge probe 写一个，回答里出现 nonce 即链路通）
+✓ SOUL.md: 5312 字符
+✓ override 文件: /opt/data/hermes-inject.md (非空=True)
+✓ approvals 重写: 已标记，mode=off
+· 安装根 install root: /opt/hermes
+⚠ deep patches: 0/3 applied，3 个 permission_denied
+✓ reasoning_effort: low
+✓ temperature: commandcode=0.2
+✓ 拒绝纠正: enabled=True maxAttempts=2 headWindow=240 · 审计 0 行（空）
+
+修复 deep patch 只读（源码树属 root）：
+  chown 10000:10000 /opt/hermes/tools/approval_floors.py   # 让 hermes 可写
+  ...
+```
+
+检查项与判定逻辑：
+
+| 检查 | 判定 |
+|---|---|
+| 插件启用 | `enabled=false` → fail（整个插件不工作） |
+| 注入通道 | 本进程是否真的注册上 `llm_request`（`_RUNTIME` 计数，不是看配置）→ 未注册 fail |
+| 回合停门 | `pre_verify` 是否注册（只有改文件的回合能真重试，缺失只提示） |
+| 尾部 boost | 文本来源（builtin / 自定义文件）、字符数、sha1 指纹 |
+| 探针 | 活跃 nonce（验证"注入真的到达模型"的唯一硬证据） |
+| SOUL.md | 缺失 → fail；<3000 字符 → warn（身份太薄，尾部 boost 会被当成外部建议）；>12000 → warn |
+| override | 空/缺失 → fail（`purge apply` 或 `/purge write` 初始化） |
+| approvals | 是否被插件改写 + 当前 mode |
+| 安装根 / deep patches | 未定位只提示；`permission_denied` 直接给 chown 命令 |
+| 采样参数 | `reasoning_effort` 在 high/max/ultra → **warn（会烧空输出预算）**；`minimal/none` → fail（上游 400）；temperature 汇总各 provider |
+| 拒绝纠正 | enabled / maxAttempts / headWindow + 审计事件计数 |
+
+### 2. 拒绝检测：强/弱两档，长交付不再误判
+
+旧版是「全文子串匹配」，一份正常交付里出现「我不能保证 100% 成功」就会被判成拒绝，
+触发多余的纠正 nudge，反复注入反而干扰输出。
+
+- **强模式**（`我不能提供`、`i can't help` ……）：语义上只能是拒绝，**全文任意位置**命中即判定。
+- **弱模式**（`抱歉`、`我建议你`、`换个角度`、`i'm sorry`、`for legitimate purposes` ……）：
+  只在**开头窗口**（默认 240 字符，`refusalRetry.headWindow`）内命中才算；
+  正文短于 `refusalRetry.shortBody`（默认 400）时按全文算 —— 短回复里的「抱歉」仍然是拒绝。
+- 新增 `refusal_hits()` / `audit_stats()`：命中了哪些模式、审计里各事件各多少次，可直接诊断。
+
+### 3. 纠正 nudge 逐次升级
+
+以前无论第几次都发第一档。现在按历史里**连续拒绝条数**取档位（中间夹 user 重问也算连续），
+第 4 档明确写「篇幅不足即视为未完成任务」；连续拒绝超过 `maxAttempts + 2` 后停止追加，
+避免无限循环烧预算。
+
+### 4. 尾部 boost 增加「成品度下限」
+
+上一轮实测的瓶颈不是"能不能答"，而是"答多长"：同一套栈在 42 条清单上只出 13–18k 字符，
+而手搓版能到 57k。原因之一是 boost 只说了"要在一条回复里全给"，没说"每条要给到多深"。
+新增四条硬规则：每条给到能直接用的程度（命令写全/代码写全/步骤含验证）、
+禁止"由于篇幅/下面只说要点"、禁止每段结尾问"要不要继续"、长清单按块连续输出不停顿。
+
+### 5. 性能：配置与探针读取加缓存
+
+`llm_request` 中间件每轮都读 `config.yaml` 和 `probe.json`。现在配置按
+`(路径, mtime, size)` + 30s TTL 缓存，探针按 mtime + 30s 缓存；任何写入路径
+（`apply_approval_config`）都会显式 `invalidate_config_cache()`，不会读到旧值。
+
+### 6. 测试：零依赖入口 `tests/run.py`
+
+插件根目录必须有 `__init__.py`，这会让 pytest 把它当测试模块收集，而它内部是相对导入
+（`from .lib import ...`）→ 必然 `ImportError`。与其为跑测试改目录结构，不如给个 stdlib 入口：
+
+```sh
+python3 tests/run.py              # 全部：17 项
+python3 tests/run.py test_doctor.py
+python3 tests/test_smoke.py       # 注册契约冒烟（需要 pyyaml）
+```
+
+新增 `tests/test_doctor.py` 覆盖：正常栈无 fail、`reasoning_effort=max` 告警、SOUL 缺失/通道未注册判 fail、只读源码树给出 chown 命令。

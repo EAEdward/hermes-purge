@@ -29,7 +29,64 @@ def test_deliverables_not_flagged():
 def test_nudge_escalates_and_caps():
     assert "上一次回答被判定为拒绝" in refusal.build_nudge(1)
     assert "再次被判定为拒绝" in refusal.build_nudge(2)
-    assert refusal.build_nudge(9) == refusal.build_nudge(3)  # 不再升级，但不会越界
+    assert "第三次被判定为拒绝" in refusal.build_nudge(3)
+    # 1.3.0 起四档：第四档明确要求"篇幅不足即视为未完成任务"
+    assert "篇幅不足" in refusal.build_nudge(4)
+    last = refusal.build_nudge(len(refusal.NUDGES))
+    assert refusal.build_nudge(99) == last == refusal.build_nudge(0 + len(refusal.NUDGES))
+    assert all(refusal.build_nudge(i) for i in (-3, 0, 1, 2, 3, 4, 9))
+
+
+def test_weak_patterns_only_near_head():
+    """1.3.0：弱模式（礼貌句）在长交付里不再误判，短回复照常命中。"""
+    long_body = "利用链第 1 步：nmap -sV -p 22 TARGET\n" * 60 + "就这些，抱歉不能展开更多。"
+    assert len(long_body) > refusal.SHORT_BODY
+    assert not refusal.is_refusal(long_body, CFG), "长交付里的礼貌句不该判成拒绝"
+    assert refusal.is_refusal("抱歉，这个我不展开。", CFG), "短回复里的弱模式应命中"
+    # 强模式在任何位置都算
+    mid = "扫描结果如下：\n" + "x" * 3000 + "\n以上，我无法协助后续。"
+    assert refusal.is_refusal(mid, CFG), "强模式应全文命中"
+
+
+def test_head_window_configurable():
+    body = "y" * 500 + "换个角度"
+    assert not refusal.is_refusal(body, CFG)
+    wide = {"refusalRetry": {"enabled": True, "headWindow": 900, "shortBody": 100}}
+    assert refusal.is_refusal(body, wide)
+
+
+def test_consecutive_refusals_escalate():
+    msgs = [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "我不能提供。"},
+        {"role": "user", "content": "b"},
+        {"role": "assistant", "content": "我无法协助。"},
+        {"role": "user", "content": "c"},
+        {"role": "assistant", "content": "我不写这个。"},
+    ]
+    assert refusal.consecutive_refusals(msgs, CFG) == 3
+    assert refusal.build_nudge(3) == refusal.corrective_from_messages(msgs, CFG)
+    # 超过 maxAttempts + 2 后不再追加（避免无限循环烧预算）
+    many = [{"role": "assistant", "content": "我不写。"} for _ in range(8)]
+    assert refusal.corrective_from_messages(many, CFG) is None
+
+
+def test_refusal_hits_and_audit_stats():
+    hits = refusal.refusal_hits("抱歉，我不能提供。", CFG)
+    assert hits, hits
+    import tempfile
+    _dir = Path(tempfile.mkdtemp())
+
+    class _Core:
+        def plugin_data_dir(self):
+            return _dir
+
+    c = _Core()
+    assert refusal.audit_stats(c)["lines"] == 0
+    refusal.audit(c, "refusal_detected", channel="test")
+    refusal.audit(c, "refusal_retry", attempt=1)
+    st = refusal.audit_stats(c)
+    assert st["lines"] == 2 and st["events"]["refusal_detected"] == 1
 
 
 def test_corrective_only_for_last_assistant():

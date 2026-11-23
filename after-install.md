@@ -16,6 +16,7 @@ hermes plugins enable hermes-purge
 
 ```sh
 hermes plugins list          # hermes-purge 应为 enabled
+hermes purge doctor          # 1.3.0+：一次列全「通道 / boost / SOUL / 采样参数 / 权限」
 ```
 
 ## 2. 验证

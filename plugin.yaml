@@ -1,5 +1,5 @@
 name: hermes-purge
-version: "1.2.4"
+version: "1.3.0"
 description: "Hermes 指令权威性清洗插件（移植自 dsh-purge）：提示词层 + 行为策略 + 审批默认重写 + 多规则集切换 + override 注入。所有操作可回滚，升级后可重洗。默认身份来自 hermes-inject.md（不发明第二身份卡）。"
 author: "port of dsh-purge (YuJunZhiXue) → Hermes Agent"
 kind: standalone
@@ -49,6 +49,12 @@ config_schema:
     type: integer
   refusalRetry.patterns:
     type: array
+  # 1.3.0：弱模式（礼貌句/转向句）的判定范围。开头窗口 + 短回复阈值，
+  # 避免长交付里"我不能保证 100%"这类正文被误判成拒绝。
+  refusalRetry.headWindow:
+    type: integer
+  refusalRetry.shortBody:
+    type: integer
   # 尾部 boost：llm_request 末尾注入（dsh-purge 的 order 最大段在 Hermes 的等价物）
   boost.enabled:
     type: boolean

@@ -223,14 +223,44 @@ DEEP_PATCHES: List[PatchSpec] = [
 ]
 
 
-def read_config() -> Dict[str, Any]:
+# 配置缓存：llm_request 中间件每次请求都会读配置，30s/mtime 双条件复用。
+# 只缓存"读"这一侧；任何写入路径（apply_approval_config 等）都会调
+# invalidate_config_cache()，不会读到旧值。
+_CFG_CACHE: Dict[str, Any] = {"key": None, "at": 0.0, "cfg": {}}
+_CFG_TTL_SECONDS = 30.0
+
+
+def _config_cache_key():
+    try:
+        p = _config_path()
+        if not p:
+            return None
+        st = p.stat()
+        return (str(p), st.st_mtime, st.st_size)
+    except Exception:
+        return None
+
+
+def invalidate_config_cache() -> None:
+    _CFG_CACHE.update({"key": None, "at": 0.0, "cfg": {}})
+
+
+def read_config(use_cache: bool = True) -> Dict[str, Any]:
     """读取（只读）config.yaml。任何异常 → {}，绝不阻断插件。"""
+    now = time.time()
+    key = _config_cache_key()
+    if (use_cache and key is not None and _CFG_CACHE["key"] == key
+            and now - float(_CFG_CACHE["at"]) < _CFG_TTL_SECONDS):
+        return _CFG_CACHE["cfg"]
     try:
         from hermes_cli.config import load_config_readonly
         cfg = load_config_readonly()
-        return cfg if isinstance(cfg, dict) else {}
+        cfg = cfg if isinstance(cfg, dict) else {}
     except Exception:
-        return {}
+        cfg = {}
+    if key is not None:
+        _CFG_CACHE.update({"key": key, "at": now, "cfg": cfg})
+    return cfg
 
 
 def plugin_config(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -377,6 +407,31 @@ def _patch_status(spec: PatchSpec) -> str:
     if spec.needle in text:
         return "pending"
     return "pattern_not_found"
+
+
+def permission_fix_commands() -> List[str]:
+    """对 permission_denied 的补丁目标给出可直接执行的修复命令（doctor/status 用）。
+
+    场景：Hermes 以 root 装、插件进程以非 root 跑（容器里常见 —— 源码树 root:root
+    755，插件进程 uid 10000）。补丁本身是纯文本替换，只要目标文件可写即可。
+    """
+    cmds: List[str] = []
+    root = hermes_install_root()
+    if not root:
+        return cmds
+    denied = [spec for spec in DEEP_PATCHES if _patch_status(spec) == "permission_denied"]
+    if not denied:
+        return cmds
+    try:
+        import pwd
+        user = pwd.getpwuid(os.geteuid()).pw_name
+    except Exception:
+        user = str(os.geteuid())
+    for spec in denied:
+        fp = root.joinpath(*spec.rel)
+        cmds.append(f"chown {os.geteuid()}:{os.getegid()} {fp}   # 让 {user} 可写")
+    cmds.append(f"# 或者以 root 执行：docker exec -u 0 <container> hermes purge apply")
+    return cmds
 
 
 def _backup_file(fp: Path) -> str:
@@ -530,6 +585,7 @@ def apply_approval_config(force: bool = False) -> Dict[str, Any]:
         else:
             # 没有任何 approvals 改动，但需要落 marker 时仍可安全保存
             config_mod.save_config({}, merge_existing=True)
+        invalidate_config_cache()
         return {"status": "applied" if changed else "noop", "changed": changed}
     except Exception as e:
         logger.warning("hermes-purge: config rewrite failed: %s", e)

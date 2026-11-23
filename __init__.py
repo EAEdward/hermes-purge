@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 name = core.PLUGIN_ID
 
+# 运行时探针：记录本进程真正注册成功的通道（doctor 据此判断"装了但没生效"）
+_RUNTIME: Dict[str, Any] = {"middleware": [], "hooks": [], "sections": []}
+
 
 # ── 状态渲染 ─────────────────────────────────────────────────────
 
@@ -64,8 +67,9 @@ def render_status(state: Dict[str, Any]) -> str:
         mark = "✓" if s in ("applied", "already") else "✗" if s in ("pending",) else "·"
         out.append(f"  {mark} [#{spec_id}] {s}")
     if any(v == "permission_denied" for v in state["patch_status"].values()):
-        out.append("  ⚠ 源码树不可写：Hermes 以 root 运行时需 chown 目标文件，"
-                   "或以 root 身份执行 purge_apply")
+        out.append("  ⚠ 源码树不可写（权限不足），修复命令：")
+        for c in core.permission_fix_commands():
+            out.append(f"    {c}")
     out.append("")
     out.append(_line("·", "规则集目录", state["rules_dir"]))
     if state["rules"]:
@@ -82,6 +86,137 @@ def _fmt_size(size: int) -> str:
         return f"{size} B"
     kb = size / 1024
     return f"{round(kb)} KB" if kb >= 100 else f"{kb:.1f} KB"
+
+
+# ── 自检 / doctor ────────────────────────────────────────────────
+# 把「装好了但没生效」的常见原因一次列全：通道是否注册、boost 从哪来、
+# SOUL 体量、approvals 是否真被改写、deep patch 为什么打不上、采样参数是否
+# 把输出预算烧空、拒绝纠正是否在跑。
+
+def _soul_report(home: str) -> tuple:
+    from pathlib import Path as _P
+    p = _P(home) / "SOUL.md"
+    if not p.is_file():
+        return ("✗", "SOUL.md", "缺失（身份只来自 hermes-inject.md，效果会明显变弱）", False)
+    try:
+        n = len(p.read_text(encoding="utf-8", errors="replace"))
+    except Exception as e:
+        return ("✗", "SOUL.md", f"读取失败: {e}", False)
+    if n < 3000:
+        return ("⚠", "SOUL.md", f"{n} 字符（偏薄，建议 4–8k：身份条款带得越短，尾部 boost 越容易被当成外部建议）", False)
+    if n > 12000:
+        return ("⚠", "SOUL.md", f"{n} 字符（偏厚，注意与其他 section 抢 8000 预算）", True)
+    return ("✓", "SOUL.md", f"{n} 字符", True)
+
+
+def _sampling_report(cfg: Dict[str, Any]) -> list:
+    out = []
+    # reasoning_effort
+    effort = str(((cfg.get("agent") or {}).get("reasoning_effort")) or "").strip().lower()
+    if effort in ("high", "xhigh", "max", "ultra"):
+        out.append(("⚠", "reasoning_effort", f"{effort} — 高风险：思考会吃掉输出预算，实测长清单会变成空答复；low/medium 最稳"))
+    elif effort in ("minimal", "none", "false", "disabled"):
+        out.append(("✗", "reasoning_effort", f"{effort} — 上游返回 400（不支持的档位）"))
+    elif effort:
+        out.append(("✓", "reasoning_effort", effort))
+    else:
+        out.append(("·", "reasoning_effort", "未设置（走提供商默认，通常最短思考）"))
+    # temperature（各 provider 的 extra_body）
+    temps = []
+    for pname, pcfg in (cfg.get("providers") or {}).items():
+        if isinstance(pcfg, dict):
+            body = pcfg.get("extra_body") if isinstance(pcfg.get("extra_body"), dict) else {}
+            if "temperature" in body:
+                temps.append(f"{pname}={body['temperature']}")
+            elif "temperature" in pcfg:
+                temps.append(f"{pname}={pcfg['temperature']}")
+    if temps:
+        out.append(("✓", "temperature", ", ".join(temps)))
+    else:
+        out.append(("·", "temperature", "未设置（建议 0.2–0.3：同一提示词不来回摆）"))
+    return out
+
+
+def render_doctor() -> str:
+    raw = core.read_config()          # 全量配置：agent / providers / approvals 都在这里
+    cfg = core.plugin_config(raw)     # 插件自己的配置（enabled / boost / refusalRetry ...）
+    st = core.gather_state()
+    home = st["hermes_home"]
+    rows = []  # (mark, name, detail, ok_or_none)
+
+    rows.append(("✓" if cfg.get("enabled", True) else "✗", "插件启用",
+                 "enabled=true" if cfg.get("enabled", True) else "enabled=false（整个插件不工作）",
+                 bool(cfg.get("enabled", True))))
+
+    mw = _RUNTIME.get("middleware", [])
+    rows.append(("✓" if "llm_request" in mw else "✗", "注入通道 llm_request",
+                 f"已注册 {mw}" if mw else "未注册（尾部 boost / 拒绝纠正全部失效）",
+                 "llm_request" in mw))
+    hooks = _RUNTIME.get("hooks", [])
+    rows.append(("✓" if "pre_verify" in hooks else "·", "回合停门 pre_verify",
+                 f"已注册 {hooks}" if hooks else "未注册（只在改文件回合能真重试）",
+                 None))
+
+    try:
+        fp = boost.fingerprint(cfg, home=__import__("pathlib").Path(home))
+        rows.append(("✓" if cfg.get("boost", {}).get("enabled", True) else "·", "尾部 boost",
+                     f"{fp['source']} · {fp['chars']} 字符 · sha1={fp['sha1']}", None))
+    except Exception as e:
+        rows.append(("✗", "尾部 boost", f"生成失败: {e}", False))
+
+    nonce = boost.read_probe(core)
+    rows.append(("✓" if nonce else "·", "运行时探针",
+                 f"活跃 nonce={nonce}" if nonce else "未启用（hermes purge probe 写一个，回答里出现 nonce 即链路通）",
+                 None))
+
+    rows.append(_soul_report(home))
+
+    ov = st["override_path"]
+    rows.append(("✓" if st["override_nonempty"] else "✗", "override 文件",
+                 f"{ov} (非空={st['override_nonempty']})" if st["override_nonempty"]
+                 else f"{ov} 为空/缺失（hermes purge apply 或 /purge write <文本> 初始化）",
+                 True if st["override_nonempty"] else False))
+
+    rows.append(("✓" if st["config_rewritten"] else "·", "approvals 重写",
+                 f"已标记，mode={st['approvals_mode']}" if st["config_rewritten"]
+                 else f"未标记，mode={st['approvals_mode']}", None))
+
+    install = st.get("install_root")
+    rows.append(("✓" if install else "·", "安装根 install root",
+                 str(install) if install else "未定位（仅 deepPatch 需要：设 HERMES_INSTALL_DIR）", None))
+    denied = [v for v in st["patch_status"].values() if v == "permission_denied"]
+    rows.append(("⚠" if denied else "✓", "deep patches",
+                 f"{st['deep_patches_applied']}/{st['deep_patches_total']} applied"
+                 + (f"，{len(denied)} 个 permission_denied" if denied else ""), None))
+
+    for mark, name, detail in _sampling_report(raw):
+        rows.append((mark, name, detail, None))
+
+    rc = cfg.get("refusalRetry") or {}
+    stats = refusal.audit_stats(core)
+    rows.append(("✓" if refusal.enabled(cfg) else "·", "拒绝纠正",
+                 f"enabled={refusal.enabled(cfg)} maxAttempts={refusal.max_attempts(cfg)} "
+                 f"headWindow={refusal._head_window(cfg)} · 审计 {stats['lines']} 行"
+                 f"（{', '.join(f'{k}={v}' for k, v in stats['events'].items()) or '空'}）", None))
+
+    out = ["hermes-purge 自检 / Doctor"]
+    for mark, name, detail, _ok in rows:
+        out.append(f"{mark} {name}: {detail}")
+
+    fix = core.permission_fix_commands()
+    if fix:
+        out.append("")
+        out.append("修复 deep patch 只读（源码树属 root）：")
+        for c in fix:
+            out.append(f"  {c}")
+
+    bad = [r for r in rows if r[3] is False]
+    warn = [r for r in rows if r[0] == "⚠"]
+    out.append("")
+    out.append(f"结论: {len(rows) - len(bad) - len(warn)} ok, {len(warn)} warn, {len(bad)} fail")
+    if bad:
+        out.append("必须先修失败项，否则尾部 boost 这段可能根本没送到模型。")
+    return "\n".join(out)
 
 
 # ── 自动应用 ─────────────────────────────────────────────────────
@@ -128,6 +263,8 @@ def _handle_purge(raw_args: str = "", _cfg: Optional[Dict[str, Any]] = None) -> 
 
     if sub in ("status", "s"):
         return render_status(core.gather_state())
+    if sub in ("doctor", "doc", "check", "diag"):
+        return render_doctor()
     if sub in ("apply", "a"):
         # 全量：override 初始化 + 审批重写 + deep patches
         core.ensure_override_content(fill_default=True)
@@ -192,6 +329,7 @@ def _handle_purge(raw_args: str = "", _cfg: Optional[Dict[str, Any]] = None) -> 
                 f"插件不发明第二身份；hermes-inject.md 即身份。")
     return ("hermes-purge 命令：\n"
             "  /purge status        显示状态\n"
+            "  /purge doctor        自检（通道/boost/SOUL/采样参数/权限一次列全）\n"
             "  /purge apply         应用清洗（override 初始化 + approvals 重写 + 可选 deep patch）\n"
             "  /purge revert        回滚 deep patches\n"
             "  /purge write <文本>   直接写入 override 注入文件\n"
@@ -350,6 +488,7 @@ def _register_cli(ctx) -> None:
     def setup(parser):
         sub = parser.add_subparsers(dest="purge_sub")
         for action, help_text in (("status", "显示清洗状态"), ("apply", "应用清洗"),
+                                  ("doctor", "自检：通道/boost/SOUL/采样/权限"),
                                   ("revert", "回滚 deep patches"),
                                   ("probe", "写入运行时探针 nonce（验证注入是否到达模型）"),
                                   ("probe-clear", "清除运行时探针")):
@@ -360,6 +499,8 @@ def _register_cli(ctx) -> None:
         action = getattr(args, "purge_action", "status")
         if action == "apply":
             text = _apply_tool_text(core.plugin_config())
+        elif action == "doctor":
+            text = render_doctor()
         elif action == "revert":
             text = _revert_tool_text()
         elif action == "probe":
@@ -484,12 +625,14 @@ def register(ctx) -> None:
         position="after_memory",
         max_chars=4000,
     )
+    _RUNTIME["sections"].append("purge-core")
     ctx.register_system_prompt_section(
         "purge-rules",
         lambda info: inject._rules_section_text(),
         position="after_memory",
         max_chars=3800,
     )
+    _RUNTIME["sections"].append("purge-rules")
 
     # 2. 命令
     ctx.register_command("purge", handler=lambda raw: _handle_purge(raw or ""),
@@ -518,16 +661,19 @@ def register(ctx) -> None:
 
     try:
         ctx.register_hook("on_session_start", _on_session_start)
+        _RUNTIME["hooks"].append("on_session_start")
     except Exception as e:
         logger.warning("hermes-purge: on_session_start hook registration failed: %s", e)
 
     # 6. 拒绝检测 + 纠正（移植 dsh-purge 1.7.20 的 refusal-retry）
     try:
         ctx.register_middleware("llm_request", _llm_request_refusal_middleware)
+        _RUNTIME["middleware"].append("llm_request")
     except Exception as e:
         logger.warning("hermes-purge: llm_request middleware registration failed: %s", e)
     try:
         ctx.register_hook("pre_verify", _pre_verify_refusal)
+        _RUNTIME["hooks"].append("pre_verify")
     except Exception as e:
         logger.warning("hermes-purge: pre_verify hook registration failed: %s", e)
 
