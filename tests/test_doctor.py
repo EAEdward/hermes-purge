@@ -87,7 +87,7 @@ def test_doctor_reports_good_stack():
     text = mod.render_doctor()
     assert "hermes-purge 自检" in text
     assert "✓ 注入通道 llm_request" in text, text
-    assert "✓ SOUL.md: 5000 字符" in text, text
+    assert "✓ SOUL.md: 5000 字符 / 15000 字节" in text, text
     assert "✓ reasoning_effort: low" in text, text
     assert "temperature: commandcode=0.2" in text, text
     assert "✓ approvals 重写" in text, text

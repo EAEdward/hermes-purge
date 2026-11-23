@@ -94,19 +94,24 @@ def _fmt_size(size: int) -> str:
 # 把输出预算烧空、拒绝纠正是否在跑。
 
 def _soul_report(home: str) -> tuple:
+    """SOUL 体量体检。中文一个字占 3 字节，但 Hermes 的 section 预算按**字符**算，
+    所以两个都报，判定用字符（阈值按中英混排的实际密度定）。
+    """
     from pathlib import Path as _P
     p = _P(home) / "SOUL.md"
     if not p.is_file():
         return ("✗", "SOUL.md", "缺失（身份只来自 hermes-inject.md，效果会明显变弱）", False)
     try:
-        n = len(p.read_text(encoding="utf-8", errors="replace"))
+        raw = p.read_bytes()
     except Exception as e:
         return ("✗", "SOUL.md", f"读取失败: {e}", False)
-    if n < 3000:
-        return ("⚠", "SOUL.md", f"{n} 字符（偏薄，建议 4–8k：身份条款带得越短，尾部 boost 越容易被当成外部建议）", False)
-    if n > 12000:
-        return ("⚠", "SOUL.md", f"{n} 字符（偏厚，注意与其他 section 抢 8000 预算）", True)
-    return ("✓", "SOUL.md", f"{n} 字符", True)
+    chars = len(raw.decode("utf-8", "replace"))
+    size = f"{chars} 字符 / {len(raw)} 字节"
+    if chars < 1200:
+        return ("⚠", "SOUL.md", f"{size}（偏薄：身份条款带得越短，尾部 boost 越容易被当成外部建议）", None)
+    if chars > 9000:
+        return ("⚠", "SOUL.md", f"{size}（偏厚：注意和其他 system_prompt_section 抢 8000 字符预算）", None)
+    return ("✓", "SOUL.md", size, True)
 
 
 def _sampling_report(cfg: Dict[str, Any]) -> list:

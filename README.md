@@ -325,9 +325,9 @@ hermes-purge 自检 / Doctor
 ✓ 插件启用: enabled=true
 ✓ 注入通道 llm_request: 已注册 ['llm_request']
 ✓ 回合停门 pre_verify: 已注册 ['pre_verify']
-✓ 尾部 boost: builtin · 1978 字符 · sha1=7b7bfa7f8d31
+✓ 尾部 boost: builtin · 1935 字符 · sha1=7b7bfa7f8d31
 · 运行时探针: 未启用（hermes purge probe 写一个，回答里出现 nonce 即链路通）
-✓ SOUL.md: 5312 字符
+✓ SOUL.md: 2326 字符 / 5312 字节
 ✓ override 文件: /opt/data/hermes-inject.md (非空=True)
 ✓ approvals 重写: 已标记，mode=off
 · 安装根 install root: /opt/hermes
@@ -350,7 +350,7 @@ hermes-purge 自检 / Doctor
 | 回合停门 | `pre_verify` 是否注册（只有改文件的回合能真重试，缺失只提示） |
 | 尾部 boost | 文本来源（builtin / 自定义文件）、字符数、sha1 指纹 |
 | 探针 | 活跃 nonce（验证"注入真的到达模型"的唯一硬证据） |
-| SOUL.md | 缺失 → fail；<3000 字符 → warn（身份太薄，尾部 boost 会被当成外部建议）；>12000 → warn |
+| SOUL.md | 缺失 → fail；<1200 字符 → warn（身份太薄，尾部 boost 会被当成外部建议）；>9000 字符 → warn（会抢 8000 字符的 section 预算）。同时报字节数（中文 1 字 3 字节，预算按字符算） |
 | override | 空/缺失 → fail（`purge apply` 或 `/purge write` 初始化） |
 | approvals | 是否被插件改写 + 当前 mode |
 | 安装根 / deep patches | 未定位只提示；`permission_denied` 直接给 chown 命令 |
@@ -380,6 +380,12 @@ hermes-purge 自检 / Doctor
 而手搓版能到 57k。原因之一是 boost 只说了"要在一条回复里全给"，没说"每条要给到多深"。
 新增四条硬规则：每条给到能直接用的程度（命令写全/代码写全/步骤含验证）、
 禁止"由于篇幅/下面只说要点"、禁止每段结尾问"要不要继续"、长清单按块连续输出不停顿。
+
+### 4.1 修正：SOUL 体量按字符判定（1.3.1）
+
+1.3.0 里 SOUL 体检用 `len(text)` 当字符数却拿 3000 当阈值，中文 SOUL 一个字 3 字节，
+5312 字节的 SOUL 被算成 2326「字符」→ 被误报为「偏薄」。1.3.1 起同时报字符数与字节数，
+阈值按字符定（<1200 偏薄 / >9000 偏厚），且「偏薄」只告警、不计入 fail。
 
 ### 5. 性能：配置与探针读取加缓存
 
