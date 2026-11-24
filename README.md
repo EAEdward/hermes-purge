@@ -354,7 +354,7 @@ hermes-purge 自检 / Doctor
 | override | 空/缺失 → fail（`purge apply` 或 `/purge write` 初始化） |
 | approvals | 是否被插件改写 + 当前 mode |
 | 安装根 / deep patches | 未定位只提示；`permission_denied` 直接给 chown 命令 |
-| 采样参数 | `reasoning_effort` 在 high/max/ultra → **warn（会烧空输出预算）**；`minimal/none` → fail（上游 400）；temperature 汇总各 provider |
+| 采样参数 | 只报告**当前显式设置**，不推荐取值：`reasoning_effort` 在 high/max/ultra → warn（实测会烧空输出预算）、`minimal/none` → fail（上游 400）、未设置 → 「走提供商默认，不发该字段」；temperature 汇总各 provider |
 | 拒绝纠正 | enabled / maxAttempts / headWindow + 审计事件计数 |
 
 ### 2. 拒绝检测：强/弱两档，长交付不再误判
@@ -380,6 +380,16 @@ hermes-purge 自检 / Doctor
 而手搓版能到 57k。原因之一是 boost 只说了"要在一条回复里全给"，没说"每条要给到多深"。
 新增四条硬规则：每条给到能直接用的程度（命令写全/代码写全/步骤含验证）、
 禁止"由于篇幅/下面只说要点"、禁止每段结尾问"要不要继续"、长清单按块连续输出不停顿。
+
+### 4.2 修正：采参提示改为中性陈述（1.3.2）
+
+1.3.0/1.3.1 的 doctor 会在 temperature 未设置时建议「0.2–0.3」，在 reasoning_effort 未设置时
+建议「通常最短思考」。这是把某一台机器的调优结论写死进了检测器——用户把配置回退到默认后，
+体检反而在劝他改回去。1.3.2 起只做陈述：
+
+- 未设置 → `· 未设置（走提供商默认，不发该字段）`
+- 显式设置 → `✓ 值（显式设置）`
+- 已知会出问题的档位才告警：`high/xhigh/max/ultra` → warn（实测烧空输出预算）、`minimal/none` → fail（上游 400）
 
 ### 4.1 修正：SOUL 体量按字符判定（1.3.1）
 

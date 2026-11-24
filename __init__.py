@@ -119,13 +119,13 @@ def _sampling_report(cfg: Dict[str, Any]) -> list:
     # reasoning_effort
     effort = str(((cfg.get("agent") or {}).get("reasoning_effort")) or "").strip().lower()
     if effort in ("high", "xhigh", "max", "ultra"):
-        out.append(("⚠", "reasoning_effort", f"{effort} — 高风险：思考会吃掉输出预算，实测长清单会变成空答复；low/medium 最稳"))
+        out.append(("⚠", "reasoning_effort", f"{effort} — 实测：思考会吃掉输出预算，长清单场景容易变成空答复"))
     elif effort in ("minimal", "none", "false", "disabled"):
         out.append(("✗", "reasoning_effort", f"{effort} — 上游返回 400（不支持的档位）"))
     elif effort:
-        out.append(("✓", "reasoning_effort", effort))
+        out.append(("✓", "reasoning_effort", f"{effort}（显式设置）"))
     else:
-        out.append(("·", "reasoning_effort", "未设置（走提供商默认，通常最短思考）"))
+        out.append(("·", "reasoning_effort", "未设置（走提供商默认，不发该字段）"))
     # temperature（各 provider 的 extra_body）
     temps = []
     for pname, pcfg in (cfg.get("providers") or {}).items():
@@ -136,9 +136,9 @@ def _sampling_report(cfg: Dict[str, Any]) -> list:
             elif "temperature" in pcfg:
                 temps.append(f"{pname}={pcfg['temperature']}")
     if temps:
-        out.append(("✓", "temperature", ", ".join(temps)))
+        out.append(("✓", "temperature", ", ".join(temps) + "（显式设置）"))
     else:
-        out.append(("·", "temperature", "未设置（建议 0.2–0.3：同一提示词不来回摆）"))
+        out.append(("·", "temperature", "未设置（走提供商默认，不发该字段）"))
     return out
 
 
